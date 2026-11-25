@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+publish/
+windows/MSN01Monitor.WinUI/bin/
+windows/MSN01Monitor.WinUI/obj/
+.vs/
+*.user

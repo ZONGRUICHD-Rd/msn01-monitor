@@ -1,0 +1,193 @@
+name: Build & Release (WinUI Setup + Linux DEB & RPM)
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Package version (e.g. 1.0.0)'
+        required: false
+        default: '1.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Windows WinUI 3 + Inno Setup
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Determine Version
+        id: ver
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $v = $env:GITHUB_REF_NAME.TrimStart('v')
+          } elseif ('${{ github.event.inputs.version }}' -ne '') {
+            $v = '${{ github.event.inputs.version }}'
+          } else {
+            $v = '1.0.0'
+          }
+          echo "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Setup .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Publish WinUI 3 (win-x64 self-contained unpackaged)
+        shell: pwsh
+        run: |
+          dotnet publish windows/MSN01Monitor.WinUI/MSN01Monitor.WinUI.csproj `
+            -c Release `
+            -r win-x64 `
+            -p:Platform=x64 `
+            -p:SelfContained=true `
+            -p:WindowsAppSDKSelfContained=true `
+            -p:WindowsPackageType=None `
+            -p:Version=${{ steps.ver.outputs.version }} `
+            -o publish/win-x64
+          if (-not (Test-Path "publish/win-x64/MSN01Monitor.exe")) {
+            throw "MSN01Monitor.exe not found in publish output!"
+          }
+          Get-Item "publish/win-x64/MSN01Monitor.exe"
+
+      - name: Build Windows Setup Installer (Inno Setup 6)
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            $cmd = Get-Command iscc -ErrorAction SilentlyContinue
+            if ($cmd) { $iscc = $cmd.Source }
+          }
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+            $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $pubDir = (Resolve-Path "publish\win-x64").Path
+          $outDir = (Resolve-Path "dist").Path
+          & $iscc `
+            "/DMyAppVersion=${{ steps.ver.outputs.version }}" `
+            "/DPublishDir=$pubDir" `
+            "/DOutputDir=$outDir" `
+            "packaging\windows\installer.iss"
+          Compress-Archive -Path "$pubDir\*" -DestinationPath "$outDir\MSN01-Monitor-Portable-${{ steps.ver.outputs.version }}-win-x64.zip" -Force
+          Get-ChildItem dist
+
+      - name: Upload Windows Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-winui-packages
+          path: dist/*
+
+  build-linux:
+    name: Linux DEB (Debian/Ubuntu) & RPM (RedHat/YUM)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Determine Version
+        id: ver
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            V="${GITHUB_REF_NAME#v}"
+          elif [[ -n "${{ github.event.inputs.version }}" ]]; then
+            V="${{ github.event.inputs.version }}"
+          else
+            V="1.0.0"
+          fi
+          echo "version=${V}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Test & Packaging Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            python3-serial python3-pil python3-psutil python3-numpy \
+            dpkg-dev rpm
+
+      - name: Run Python Unit Tests
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Build Debian (.deb) and RedHat (.rpm) Packages
+        run: |
+          chmod +x packaging/linux/build_deb.sh packaging/linux/build_rpm.sh
+          ./packaging/linux/build_deb.sh "${{ steps.ver.outputs.version }}"
+          ./packaging/linux/build_rpm.sh "${{ steps.ver.outputs.version }}"
+          ls -lh dist/
+
+      - name: Verify DEB Install & CLI Execution
+        run: |
+          sudo apt-get install -y --no-install-recommends "./dist/msn01-monitor_${{ steps.ver.outputs.version }}_all.deb"
+          msn01-monitor --list-themes
+          msn01-monitor --list-gpus
+          test -f /usr/lib/udev/rules.d/99-msn01-screen.rules
+          test -f /usr/lib/systemd/user/msn01-monitor.service
+          test -f /usr/share/applications/msn01-monitor.desktop
+
+      - name: Verify RPM Package Integrity
+        run: |
+          rpm -K --nosignature "./dist/msn01-monitor-${{ steps.ver.outputs.version }}-1.noarch.rpm"
+          rpm -qp --requires "./dist/msn01-monitor-${{ steps.ver.outputs.version }}-1.noarch.rpm"
+
+      - name: Upload Linux Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-deb-rpm-packages
+          path: dist/*
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [ build-windows, build-linux ]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate Checksums
+        run: |
+          cd release-assets
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create or Update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VER="${TAG#v}"
+          cat > release_notes.md <<EOF
+          ## MSN01 USB 小屏幕 CPU / GPU / RAM 硬件监控上位机 ${TAG}
+
+          ### 安装包下载
+          - **Windows (WinUI 3 原生安装包)**：\`MSN01-Monitor-Setup-${VER}-win-x64.exe\`（自包含 .NET 8 + Windows App SDK，开箱即用）
+          - **Windows 便携版**：\`MSN01-Monitor-Portable-${VER}-win-x64.zip\`
+          - **Debian / Ubuntu (\`.deb\`)**：\`sudo apt install ./msn01-monitor_${VER}_all.deb\`
+          - **RedHat / CentOS / Rocky / Fedora (\`.rpm\`)**：\`sudo dnf install ./msn01-monitor-${VER}-1.noarch.rpm\` 或 \`sudo yum localinstall ./msn01-monitor-${VER}-1.noarch.rpm\`
+
+          ### 核心特性
+          - 自动识别 **MSN01 / CH32x035 (\`1A86:FE0C\`)** 串口小屏（支持 \`160×80\` 与 \`320×172\`）
+          - Windows 端采用原生 **WinUI 3 + Mica 材质 + SkiaSharp**；Linux 端提供 GUI 与无界面 CLI / systemd 守护服务及免 root udev 规则
+          - 硬件填充+差分压缩高速推流，实时采集 CPU / GPU / RAM（无需管理员权限）
+          - 内置 4 套高对比度仪表盘主题，支持轻触机身触摸键循环切换主题
+          EOF
+          sed -i 's/^          //' release_notes.md
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" release-assets/* --clobber --repo "${GITHUB_REPOSITORY}"
+            gh release edit "${TAG}" --notes-file release_notes.md --repo "${GITHUB_REPOSITORY}"
+          else
+            gh release create "${TAG}" release-assets/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "MSN01 System Monitor ${TAG}" \
+              --notes-file release_notes.md
+          fi

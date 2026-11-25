@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=MSN01 System Monitor
+Name[zh_CN]=MSN01 硬件监控上位机
+Comment=Real-time CPU/GPU/RAM monitor host for MSN01 CH32x035 USB mini screen
+Comment[zh_CN]=MSN01 USB 迷你副屏 CPU/GPU/RAM 实时监控上位机
+Exec=/usr/bin/msn01-monitor
+Icon=msn01-monitor
+Terminal=false
+Categories=System;Monitor;Utility;
+Keywords=CPU;GPU;RAM;Monitor;USB;Screen;MSN01;
+StartupNotify=true
