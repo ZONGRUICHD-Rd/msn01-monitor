@@ -160,9 +160,7 @@ jobs:
           sha256sum * > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
-      - name: Create or Update GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Prepare Release Notes
         run: |
           TAG="${GITHUB_REF_NAME}"
           VER="${TAG#v}"
@@ -182,12 +180,11 @@ jobs:
           - 内置 4 套高对比度仪表盘主题，支持轻触机身触摸键循环切换主题
           EOF
           sed -i 's/^          //' release_notes.md
-          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            gh release upload "${TAG}" release-assets/* --clobber --repo "${GITHUB_REPOSITORY}"
-            gh release edit "${TAG}" --notes-file release_notes.md --repo "${GITHUB_REPOSITORY}"
-          else
-            gh release create "${TAG}" release-assets/* \
-              --repo "${GITHUB_REPOSITORY}" \
-              --title "MSN01 System Monitor ${TAG}" \
-              --notes-file release_notes.md
-          fi
+
+      - name: Create or Update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: MSN01 System Monitor ${{ github.ref_name }}
+          body_path: release_notes.md
+          files: release-assets/*
+          overwrite_files: true
